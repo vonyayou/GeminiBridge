@@ -1,0 +1,12 @@
+export interface Model { id: string; displayName: string; provider: string; available: boolean; mock: boolean; capabilities: string[]; streaming: boolean; checkedAt: string; aliases?: string[] }
+export interface Provider { id: string; name: string; connection: string; authentication: string; availableModels: number; mock: boolean; description: string; checkedAt: string; lastSuccessfulRequest?: string; lastError?: string }
+export interface HistoryRow { id: string; timestamp: string; requestedModel?: string; resolvedModel?: string; provider?: string; durationMs: number; httpStatus: number; inputTokens?: number; outputTokens?: number; streaming: boolean; client: string; errorMessage?: string }
+export interface HistoryDetail extends HistoryRow { requestHeaders?: string; requestBody?: string; responseBody?: string }
+export interface HistoryPage { content: HistoryRow[]; totalElements: number; totalPages: number; page: number; size: number }
+export interface Dashboard { totalRequests: number; requestsToday: number; averageLatencyMs: number; successRate?: number; availableModels: number; providers: Provider[]; recentActivity: HistoryRow[]; baseUrl: string; historyEnabled: boolean }
+export interface Settings { host: string; port: number; historyEnabled: boolean; saveRequestBodies: boolean; saveResponseBodies: boolean; retentionDays: number; theme: 'dark' | 'light' | 'system'; compactSidebar: boolean; baseUrl: string; activeHost: string; activePort: number; restartRequired: boolean; authenticationRequired: boolean }
+export interface AuthStatus { provider: string; state: string; supported: boolean; credentialStored: boolean; message: string; unofficial?: boolean; sessionLoaded?: boolean; profileId?: string; availableModels?: number; accountEmail?: string; source?: 'browser' | 'manual'; manualCookiesLoaded?: boolean; verificationAvailable?: boolean }
+export interface BrowserProfile { id: string; browser: string; name: string }
+export interface GoogleLogin { id: string; state: string; profileName: string; expiresAt: string; message: string }
+export interface ResponseObject { id: string; status: string; model: string; output: { content: { type: string; text: string }[] }[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number }; error?: { message: string; code: string } }
+export interface StreamEvent { type: string; sequence_number: number; delta?: string; response?: ResponseObject }

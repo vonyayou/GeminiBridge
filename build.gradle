@@ -1,0 +1,123 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.7'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'me.vonyayou.geminibridge'
+version = '1.0.0'
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+repositories { mavenCentral() }
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.hibernate.orm:hibernate-community-dialects'
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+configurations { unitTestRuntime }
+dependencies {
+    unitTestRuntime 'org.springframework.boot:spring-boot-starter-test'
+    unitTestRuntime 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.register('unitTest', Test) {
+    group = 'verification'
+    description = 'Runs provider, gateway, and security unit tests without a database.'
+    dependsOn 'testClasses'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.main.output + sourceSets.test.output + configurations.testCompileClasspath + configurations.unitTestRuntime
+    include '**/unit/**'
+    useJUnitPlatform()
+    doFirst { mkdir 'test_run/tmp' }
+    systemProperty 'bridge.data-dir', file('test_run/unit').absolutePath
+    systemProperty 'bridge.firefox-root', file('test_run/empty-browser-profiles').absolutePath
+    systemProperty 'java.io.tmpdir', file('test_run/tmp').absolutePath
+    reports.html.outputLocation = layout.projectDirectory.dir('test_run/reports/unit')
+}
+
+tasks.register('frontendInstall', Exec) {
+    workingDir 'frontend'
+    commandLine 'npm', project.hasProperty('updateFrontendDependencies') || !file('frontend/package-lock.json').exists() ? 'install' : 'ci', '--no-audit', '--no-fund'
+    inputs.files('frontend/package.json', 'frontend/package-lock.json')
+    outputs.dir('frontend/node_modules')
+}
+
+tasks.register('frontendBuild', Exec) {
+    dependsOn 'frontendInstall'
+    workingDir 'frontend'
+    commandLine 'npm', 'run', 'build'
+    inputs.dir('frontend/src')
+    inputs.files('frontend/index.html', 'frontend/tsconfig.json', 'frontend/tsconfig.app.json', 'frontend/vite.config.ts', 'frontend/package.json')
+    outputs.dir('frontend/dist')
+}
+
+tasks.register('frontendTest', Exec) {
+    dependsOn 'frontendInstall'
+    workingDir 'frontend'
+    commandLine 'npm', 'test', '--', '--run'
+}
+
+tasks.register('browserTest', Exec) {
+    group = 'verification'
+    description = 'Tests the packaged application in Chromium.'
+    dependsOn 'bootJar', 'frontendInstall'
+    workingDir 'frontend'
+    commandLine 'npm', 'run', 'test:e2e'
+    if (project.hasProperty('testBrowser')) environment 'GB_TEST_BROWSER', project.property('testBrowser')
+    if (project.hasProperty('browserGrep')) args '--', '--grep', project.property('browserGrep')
+}
+
+tasks.named('processResources') {
+    dependsOn 'frontendBuild'
+    from('frontend/dist') { into 'static' }
+}
+tasks.named('test') {
+    useJUnitPlatform()
+    doFirst { mkdir 'test_run/tmp' }
+    systemProperty 'bridge.data-dir', file('test_run/data').absolutePath
+    systemProperty 'bridge.firefox-root', file('test_run/empty-browser-profiles').absolutePath
+    systemProperty 'java.io.tmpdir', file('test_run/tmp').absolutePath
+    reports.html.outputLocation = layout.projectDirectory.dir('test_run/reports/backend')
+}
+tasks.named('check') { dependsOn 'frontendTest' }
+tasks.named('bootJar') { archiveFileName = 'geminibridge-1.0.0.jar' }
+
+tasks.register('build-with-dependencies') {
+    group = 'build'
+    description = 'Downloads the Gradle and npm dependencies, then builds the jar.'
+    dependsOn 'build-dependencies', 'bootJar'
+}
+
+
+tasks.register('build-dependencies') {
+    group = 'build'
+    description = 'Downloads the Gradle and npm dependencies.'
+    dependsOn 'frontendInstall'
+    doLast {
+        configurations.findAll { it.canBeResolved }.each { it.resolve() }
+    }
+}
+
+tasks.register('run') {
+    group = 'application'
+    description = 'Builds and starts GeminiBridge with its bundled web UI.'
+    dependsOn 'bootRun'
+}
+
+tasks.register('runTest', org.springframework.boot.gradle.tasks.run.BootRun) {
+    group = 'application'
+    description = 'Starts an isolated instance on port 18080 using test_run.'
+    dependsOn 'classes'
+    mainClass = 'me.vonyayou.geminibridge.GeminiBridgeApplication'
+    classpath = sourceSets.main.runtimeClasspath
+    environment 'GB_DATA_DIR', file('test_run/data').absolutePath
+    environment 'GB_PORT', '18080'
+}

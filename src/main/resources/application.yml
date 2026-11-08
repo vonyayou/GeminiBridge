@@ -1,0 +1,39 @@
+server:
+  address: ${GB_HOST:127.0.0.1}
+  port: ${GB_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+  tomcat:
+    max-http-form-post-size: 1MB
+    max-swallow-size: 1MB
+    threads:
+      max: 64
+spring:
+  config:
+    import: optional:file:${GB_DATA_DIR:./data}/server.properties
+  application:
+    name: GeminiBridge
+  datasource:
+    url: jdbc:sqlite:${GB_DATA_DIR:./data}/geminibridge.db?busy_timeout=10000&journal_mode=WAL
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  jackson:
+    default-property-inclusion: non_null
+  mvc:
+    async:
+      request-timeout: 120000
+bridge:
+  data-dir: ${GB_DATA_DIR:./data}
+  firefox-root: ${GB_FIREFOX_ROOT:}
+logging:
+  level:
+    root: INFO
+    org.hibernate: WARN
+    org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver: ERROR

@@ -46,8 +46,13 @@ const server = http.createServer((request, response) => {
         if (selector[4] !== 'fixture-pro') throw new Error('Unexpected test model');
         const outer = JSON.parse(new URLSearchParams(body).get('f.req'));
         const inner = JSON.parse(outer[1]);
+        if (selector.at(-2) !== inner[80]) throw new Error('Thinking header and body must agree');
         const text = 'Fixture response\n\n' + inner[0][0];
         response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }); response.write(")]}'\n\n");
+        if (inner[80] === 2) {
+          const candidate = Array(38).fill(null); candidate[0] = 'candidate'; candidate[8] = [1]; candidate[37] = [['Fixture thinking: проверяю 👋']];
+          const data = Array(5).fill(null); data[4] = [candidate]; response.write(frame(data, 'generate'));
+        }
         let end = 0;
         const timer = setInterval(() => {
           end = Math.min(end + 64, text.length);

@@ -8,5 +8,5 @@ export interface Settings { host: string; port: number; historyEnabled: boolean;
 export interface AuthStatus { provider: string; state: string; supported: boolean; credentialStored: boolean; message: string; unofficial?: boolean; sessionLoaded?: boolean; profileId?: string; availableModels?: number; accountEmail?: string; source?: 'browser' | 'manual'; manualCookiesLoaded?: boolean; verificationAvailable?: boolean }
 export interface BrowserProfile { id: string; browser: string; name: string }
 export interface GoogleLogin { id: string; state: string; profileName: string; expiresAt: string; message: string }
-export interface ResponseObject { id: string; status: string; model: string; output: { content: { type: string; text: string }[] }[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number }; error?: { message: string; code: string } }
+export interface ResponseObject { id: string; status: string; model: string; output: { type?: string; content?: { type: string; text: string }[]; summary?: { type: string; text: string }[] }[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number }; error?: { message: string; code: string } }
 export interface StreamEvent { type: string; sequence_number: number; delta?: string; response?: ResponseObject }

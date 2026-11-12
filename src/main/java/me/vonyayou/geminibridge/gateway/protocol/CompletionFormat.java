@@ -10,6 +10,7 @@ public interface CompletionFormat {
     Map<String, Object> reply(ResponseDocument document, String status, Provider.ProviderResult result, ApiException error);
     void start(ResponseDocument document, StreamOutput stream);
     void delta(ResponseDocument document, StreamOutput stream, String delta);
+    void reasoningDelta(ResponseDocument document, StreamOutput stream, String delta);
     void complete(ResponseDocument document, StreamOutput stream, Provider.ProviderResult result);
     void fail(ResponseDocument document, StreamOutput stream, ApiException error);
 }

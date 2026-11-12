@@ -119,6 +119,22 @@ The gateway implements text Responses and Chat Completions endpoints. Other Open
 
 Gemini Web does not provide verified native temperature controls, token limits, JSON Schema output, or function tools through this adapter. Requests containing those controls return a structured `400 unsupported_parameter` with the rejected field. Clients can negotiate provider defaults and request JSON through their prompt; JSON then needs client-side validation.
 
+### Thinking
+
+Enable extended thinking with `"thinking":true` in either API, or use the compatible reasoning controls:
+
+```json
+{"model":"gemini-3.1-pro","input":"Solve this problem step by step","reasoning":{"effort":"high","summary":"auto"}}
+```
+
+For Chat Completions, use `"reasoning_effort":"high"` alongside `messages`. Use either `thinking` or the reasoning control in a request; combining them returns `400 invalid_request`.
+
+Gemini Web exposes two native levels: `low` and `medium` select standard thinking; `high` and `xhigh` select extended thinking. Omitted controls and `"thinking":false` use standard mode. Standard mode may still reason internally. The adapter sends the native thinking level while keeping the exact selected model. Availability and how much the model thinks remain controlled by Gemini and the connected account. Efforts `none` and `minimal`, token budgets, and explicit summary lengths are unsupported; `summary` accepts `auto` or null.
+
+When Gemini returns thinking text, Responses includes a separate `reasoning` output item with `summary_text` parts. Streaming uses `response.reasoning_summary_part.added`, `response.reasoning_summary_text.delta`, `response.reasoning_summary_text.done`, and `response.reasoning_summary_part.done`, alongside output item events. Chat Completions returns this text in `choices[0].message.reasoning_content` or streaming `choices[0].delta.reasoning_content`; this field is a compatibility extension. Thinking is never mixed into the answer or retained as assistant context for `previous_response_id`. No thinking text or token counts are fabricated when Google omits them.
+
+In Playground, enable **Thinking** beside **Streaming**. Thinking text appears in an expandable block, including during streaming. The selection is saved per conversation and carried into a new chat. Partial thinking is preserved on cancellation. As with other Playground messages, thinking text is saved in browser local storage; opt-in response body history also includes it.
+
 ## Coding agents
 
 GeminiBridge implements only text generation. It rejects function tools with `400 unsupported_parameter`. Coding agents rely on tools to run commands and edit files, so agentic features (shell, file edits, patching) will not work through this gateway. Plain chat, explanation, and code-generation prompts that do not need tools are the supported use. Test with `curl` first to confirm that the gateway and your Gemini session work.
@@ -212,7 +228,7 @@ Request bodies are limited to 1 MiB. New request text is limited to 64 KiB and c
 ## Management interface
 
 - Dashboard: recorded request counts, latency, success rate, available models, provider state, recent requests, and active Base URL.
-- Playground: streaming or complete-response chat, system instructions, Markdown and highlighted code, copying, cancellation, elapsed waiting time, duration, and provider usage.
+- Playground: streaming or complete-response chat, standard or extended thinking with expandable reasoning, system instructions, Markdown and highlighted code, copying, cancellation, elapsed waiting time, duration, and provider usage.
 - Models: availability, capabilities, refresh, details, and model-specific Playground links.
 - Request History: search, model and status filters, date sorting, pagination, details, JSON copying, and deletion.
 - Providers: connection and authentication state, last request and error, and connection checks.

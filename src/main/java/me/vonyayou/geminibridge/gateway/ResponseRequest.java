@@ -7,12 +7,16 @@ import java.util.List;
 import java.util.Set;
 
 public record ResponseRequest(String model, String instructions, List<Provider.Message> messages, boolean stream,
-                              String previousResponseId, boolean store, JsonNode metadata) {
-    private static final Set<String> FIELDS = Set.of("model", "input", "instructions", "stream", "previous_response_id", "store", "metadata", "temperature", "max_output_tokens", "tools", "tool_choice", "text");
-    public ResponseRequest withModel(String id) { return new ResponseRequest(id, instructions, messages, stream, previousResponseId, store, metadata); }
+                              String previousResponseId, boolean store, JsonNode metadata, ReasoningConfig reasoning) {
+    public ResponseRequest(String model, String instructions, List<Provider.Message> messages, boolean stream, String previousResponseId, boolean store, JsonNode metadata) {
+        this(model, instructions, messages, stream, previousResponseId, store, metadata, null);
+    }
+    private static final Set<String> FIELDS = Set.of("model", "input", "instructions", "stream", "previous_response_id", "store", "metadata", "temperature", "max_output_tokens", "tools", "tool_choice", "text", "thinking", "reasoning");
+    public ResponseRequest withModel(String id) { return new ResponseRequest(id, instructions, messages, stream, previousResponseId, store, metadata, reasoning); }
     public static ResponseRequest parse(JsonNode root) {
         if (root == null || !root.isObject()) throw invalid("body", "Provide a JSON object.");
         root.fieldNames().forEachRemaining(key -> { if (!FIELDS.contains(key)) throw unsupported(key); });
+        ReasoningConfig reasoning = ReasoningConfig.parse(root);
         String model = string(root, "model", true);
         if (model.length() > 128) throw invalid("model", "Model ID is too long.");
         String instructions = string(root, "instructions", false);
@@ -56,7 +60,7 @@ public record ResponseRequest(String model, String instructions, List<Provider.M
                 if (e.getKey().length() > 64 || !e.getValue().isTextual() || e.getValue().asText().length() > 512) throw invalid("metadata", "Metadata keys and values must be short strings.");
             });
         }
-        return new ResponseRequest(model, instructions, List.copyOf(messages), bool(root, "stream", false), previous, bool(root, "store", true), metadata);
+        return new ResponseRequest(model, instructions, List.copyOf(messages), bool(root, "stream", false), previous, bool(root, "store", true), metadata, reasoning);
     }
     private static String string(JsonNode root, String key, boolean required) {
         JsonNode value = root.get(key);

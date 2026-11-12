@@ -66,7 +66,7 @@ public class ResponsesService {
             throw e;
         }
         var document = new ResponseDocument(request);
-        var providerRequest = new Provider.ProviderRequest(request.model(), request.instructions(), messages, request.stream());
+        var providerRequest = new Provider.ProviderRequest(request.model(), request.instructions(), messages, request.stream(), request.reasoning());
         if (!request.stream()) {
             var active = new LiveRequest(capture.client());
             active.worker = Thread.currentThread();
@@ -80,7 +80,7 @@ public class ResponsesService {
                     var pending = pendingCancellations.remove(cancellationId);
                     if (pending != null && pending.owner().equals(capture.client())) active.cancel();
                 }
-                var result = provider.generate(providerRequest, ignored -> {}, () -> active.cancelled.get() || Thread.currentThread().isInterrupted());
+                var result = provider.generate(providerRequest, ignored -> {}, ignored -> {}, () -> active.cancelled.get() || Thread.currentThread().isInterrupted());
                 var response = format.reply(document, "completed", result, null);
                 if (request.store()) conversations.save(document.id(), capture.client(), messages, result.text());
                 history.record(capture, requestedModel, request.model(), provider.id(), input, response, false, 200, null, result.inputTokens(), result.outputTokens());
@@ -119,7 +119,7 @@ public class ResponsesService {
             }, heartbeatMs, heartbeatMs, TimeUnit.MILLISECONDS);
             try {
                 format.start(document, stream);
-                result = provider.generate(providerRequest, delta -> format.delta(document, stream, delta), active.cancelled::get);
+                result = provider.generate(providerRequest, delta -> format.delta(document, stream, delta), delta -> format.reasoningDelta(document, stream, delta), active.cancelled::get);
                 if (request.store()) conversations.save(document.id(), capture.client(), messages, result.text());
                 format.complete(document, stream, result);
             } catch (CancellationException e) {

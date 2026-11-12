@@ -126,15 +126,19 @@ public class GeminiWebClient {
         return List.copyOf(models.values());
     }
     public Provider.ProviderResult generate(WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, BooleanSupplier cancelled) {
+        return generate(session, model, input, delta, ignored -> {}, cancelled);
+    }
+    public Provider.ProviderResult generate(WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, Consumer<String> reasoningDelta, BooleanSupplier cancelled) {
         long timeoutMillis = client.callTimeoutMillis() > 0 ? Math.min(client.callTimeoutMillis(), 115_000) : 115_000;
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         var connection = connection(session);
         var outputStarted = new java.util.concurrent.atomic.AtomicBoolean();
         Consumer<String> trackedDelta = text -> { outputStarted.set(true); delta.accept(text); };
+        Consumer<String> trackedReasoningDelta = text -> { outputStarted.set(true); reasoningDelta.accept(text); };
         for (int attempt = 0; ; attempt++) {
             checkCancelled(cancelled);
             try {
-                return generateAttempt(connection, session, model, input, trackedDelta, cancelled, deadline);
+                return generateAttempt(connection, session, model, input, trackedDelta, trackedReasoningDelta, cancelled, deadline);
             } catch (RetryableGenerationError error) {
                 if (outputStarted.get() || attempt >= GENERATION_RETRIES) throw error;
                 long delay = TimeUnit.SECONDS.toNanos(5L << attempt);
@@ -143,16 +147,17 @@ public class GeminiWebClient {
             }
         }
     }
-    private Provider.ProviderResult generateAttempt(OkHttpClient connection, WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, BooleanSupplier cancelled, long deadline) {
+    private Provider.ProviderResult generateAttempt(OkHttpClient connection, WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, Consumer<String> reasoningDelta, BooleanSupplier cancelled, long deadline) {
         String text = ProviderPrompt.format(input);
         var payload = new ArrayList<Object>(Collections.nCopies(81, null));
         payload.set(0, Arrays.asList(text, 0, null, null, null, null, 0)); payload.set(1, List.of(session.language()));
         payload.set(2, Arrays.asList("", "", "", null, null, null, null, null, null, ""));
         payload.set(6, List.of(1)); payload.set(7, 1); payload.set(10, 1); payload.set(11, 0); payload.set(17, List.of(List.of(0)));
         payload.set(18, 0); payload.set(27, 1); payload.set(30, List.of(4)); payload.set(41, List.of(1)); payload.set(45, 1);
-        payload.set(53, 0); payload.set(61, List.of()); payload.set(68, 1); payload.set(79, model.selector().getLast()); payload.set(80, 1);
+        int thinkingLevel = input.extendedThinking() ? 2 : 1;
+        payload.set(53, 0); payload.set(61, List.of()); payload.set(68, 1); payload.set(79, model.selector().getLast()); payload.set(80, thinkingLevel);
         String nonce = UUID.randomUUID().toString().toUpperCase(Locale.ROOT); payload.set(59, nonce);
-        var selector = new ArrayList<>(model.selector()); selector.add(1); selector.add(session.requestSessionId());
+        var selector = new ArrayList<>(model.selector()); selector.add(thinkingLevel); selector.add(session.requestSessionId());
         try {
             String wire = mapper.writeValueAsString(Arrays.asList(null, mapper.writeValueAsString(payload)));
             var body = new FormBody.Builder().add("at", session.accessToken()).add("f.req", wire).build();
@@ -167,7 +172,7 @@ public class GeminiWebClient {
             });
             try (var response = call.execute()) {
                 validate(response, "generation");
-                var answer = new StringBuilder(); var complete = new java.util.concurrent.atomic.AtomicBoolean();
+                var answer = new StringBuilder(); var reasoning = new StringBuilder(); var complete = new java.util.concurrent.atomic.AtomicBoolean();
                 frames.read(Objects.requireNonNull(response.body()).charStream(), cancelled, part -> {
                     ApiException error = streamError(part);
                     if (error != null) throw error;
@@ -176,23 +181,26 @@ public class GeminiWebClient {
                     JsonNode data;
                     try { data = mapper.readTree(encoded.asText()); } catch (Exception e) { throw protocolError(); }
                     JsonNode candidate = WebFrames.at(data, 4, 0);
+                    JsonNode thoughts = WebFrames.at(candidate, 37, 0, 0);
+                    if (thoughts.isTextual() && !thoughts.asText().isEmpty()) appendOutput(reasoning, thoughts.asText(), reasoningDelta, input.streaming(), "gemini_reasoning_revised");
                     JsonNode content = WebFrames.at(candidate, 1, 0);
-                    if (!content.isTextual()) return;
-                    String next = content.asText();
-                    if (!next.startsWith(answer.toString())) {
-                        if (input.streaming()) throw new ApiException(502, "gemini_stream_revised", "Gemini Web revised already streamed text. Retry with stream=false to receive its final text.");
-                        answer.setLength(0);
-                    }
-                    if (next.length() > answer.length()) { delta.accept(next.substring(answer.length())); answer.setLength(0); answer.append(next); }
+                    if (content.isTextual()) appendOutput(answer, content.asText(), delta, input.streaming(), "gemini_stream_revised");
                     if (WebFrames.at(candidate, 8, 0).asInt() == 2) complete.set(true);
                 });
                 if (!complete.get()) throw new ApiException(502, "gemini_stream_incomplete", "Gemini Web closed the stream before confirming completion.");
                 if (answer.isEmpty()) throw new ApiException(502, "gemini_empty_response", "Gemini Web returned no supported text output.");
-                return new Provider.ProviderResult(answer.toString(), null, null);
+                return new Provider.ProviderResult(answer.toString(), null, null, reasoning.isEmpty() ? null : reasoning.toString());
             } finally { watcher.interrupt(); call.cancel(); }
         } catch (java.util.concurrent.CancellationException e) { throw e; }
         catch (ApiException e) { throw e; }
         catch (Exception e) { if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException(); throw networkError(e); }
+    }
+    private static void appendOutput(StringBuilder accumulated, String next, Consumer<String> delta, boolean streaming, String errorCode) {
+        if (!next.startsWith(accumulated.toString())) {
+            if (streaming) throw new ApiException(502, errorCode, "Gemini Web revised already streamed text. Retry with stream=false to receive its final text.");
+            accumulated.setLength(0);
+        }
+        if (next.length() > accumulated.length()) { delta.accept(next.substring(accumulated.length())); accumulated.setLength(0); accumulated.append(next); }
     }
     private Request.Builder headers(Request.Builder request) {
         return request.header("Origin", origin.toString().replaceAll("/$", "")).header("Referer", origin.newBuilder().addPathSegment("app").build().toString())

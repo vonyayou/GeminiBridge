@@ -7,6 +7,39 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.getByLabel('Management key')).toHaveCount(0)
 })
 
+test('thinking works in both response modes and stays separate from answer context', async ({ page, request }) => {
+  await page.getByRole('link', { name: 'Playground', exact: true }).click()
+  await page.getByLabel('Thinking', { exact: true }).check()
+  for (const streaming of [true, false]) {
+    if (!streaming) {
+      await page.getByRole('button', { name: 'New chat', exact: true }).click()
+      await expect(page.getByLabel('Thinking', { exact: true })).toBeChecked()
+      await page.getByLabel('Streaming', { exact: true }).uncheck()
+    }
+    await page.getByLabel('Message', { exact: true }).fill('Thinking browser test')
+    await page.getByRole('button', { name: 'Send message' }).click()
+    const assistant = page.locator('.chat-message.assistant')
+    await expect(assistant).toContainText('Fixture response')
+    await assistant.locator('summary').click()
+    await expect(assistant.locator('details')).toContainText('Fixture thinking: проверяю 👋')
+    await expect(assistant.locator('.markdown').last()).not.toContainText('Fixture thinking')
+    await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible()
+  }
+  await page.screenshot({ path: '../test_run/thinking.png', fullPage: true })
+  await page.reload()
+  await expect(page.getByLabel('Thinking', { exact: true })).toBeChecked()
+  await expect(page.locator('.chat-message.assistant details')).toContainText('Fixture thinking')
+  await page.getByLabel('Thinking', { exact: true }).uncheck()
+  await page.getByLabel('Message', { exact: true }).fill('Continue without extended thinking')
+  await page.getByRole('button', { name: 'Send message' }).click()
+  const next = page.locator('.chat-message.assistant').last()
+  await expect(next).toContainText('Continue without extended thinking')
+  await expect(next).not.toContainText('Fixture thinking')
+  const response = await request.post('/v1/chat/completions', { data: { model: 'gemini-3.1-pro', messages: [{ role: 'user', content: 'Chat thinking' }], reasoning_effort: 'high' } })
+  expect(response.status()).toBe(200)
+  expect((await response.json()).choices[0].message.reasoning_content).toBe('Fixture thinking: проверяю 👋')
+})
+
 test('dashboard opens without login and model discovery, streaming chat, and history work', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))

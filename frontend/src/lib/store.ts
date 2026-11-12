@@ -2,8 +2,8 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type { ResponseObject } from './types'
 
-export interface Message { id: string; role: 'user' | 'assistant'; content: string; model?: string; error?: string; durationMs?: number; usage?: ResponseObject['usage']; stopped?: boolean }
-export interface Chat { id: string; title: string; model: string; instructions: string; messages: Message[]; updatedAt: number }
+export interface Message { id: string; role: 'user' | 'assistant'; content: string; reasoning?: string; thinking?: boolean; model?: string; error?: string; durationMs?: number; usage?: ResponseObject['usage']; stopped?: boolean }
+export interface Chat { id: string; title: string; model: string; instructions: string; thinking?: boolean; messages: Message[]; updatedAt: number }
 const chatStorage = createJSONStorage(() => ({
   getItem: (name: string) => { try { return localStorage.getItem(name) } catch { return null } },
   setItem: (name: string, value: string) => { try { localStorage.setItem(name, value) } catch { useUi.getState().notify('Browser storage is full or unavailable. Delete older chats to save this conversation.') } },

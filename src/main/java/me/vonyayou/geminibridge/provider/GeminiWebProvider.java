@@ -17,7 +17,7 @@ public class GeminiWebProvider implements Provider {
     public List<Model> discover() {
         var snapshot = session.current();
         return snapshot == null ? List.of() : snapshot.models().stream().map(model -> new Model(model.id(), model.displayName(), id(), true, false,
-                Set.of("text", "streaming", "conversation-as-text", "unofficial-web"), true, session.checkedAt(), List.of("gemini-web-" + model.upstreamId()))).toList();
+                Set.of("text", "streaming", "conversation-as-text", "unofficial-web", "thinking"), true, session.checkedAt(), List.of("gemini-web-" + model.upstreamId()))).toList();
     }
     public ProviderStatus status() {
         return new ProviderStatus(id(), "Gemini Web", session.connection(), session.status().get("state").toString(), discover().size(), false,
@@ -26,11 +26,14 @@ public class GeminiWebProvider implements Provider {
     public ProviderStatus check() { session.check(); return status(); }
     public ApiException unavailableModel(String id) { return session.unavailableModel(id); }
     public ProviderResult generate(ProviderRequest request, Consumer<String> delta, BooleanSupplier cancelled) {
+        return generate(request, delta, ignored -> {}, cancelled);
+    }
+    public ProviderResult generate(ProviderRequest request, Consumer<String> delta, Consumer<String> reasoningDelta, BooleanSupplier cancelled) {
         var snapshot = session.requireAuthenticated();
         var model = snapshot.models().stream().filter(item -> item.id().equals(request.model())).findFirst()
                 .orElseThrow(() -> new ApiException(404, "model_not_found", "The selected model is not available in this Gemini Web session."));
         try {
-            var result = client.generate(snapshot.data(), model, request, delta, () -> cancelled.getAsBoolean() || !session.isCurrent(snapshot));
+            var result = client.generate(snapshot.data(), model, request, delta, reasoningDelta, () -> cancelled.getAsBoolean() || !session.isCurrent(snapshot));
             session.succeeded(); return result;
         } catch (ApiException error) { session.generationFailed(snapshot, error); throw error; }
     }

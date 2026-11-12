@@ -8,7 +8,7 @@ import me.vonyayou.geminibridge.provider.Provider;
 import java.util.*;
 
 public class ChatCompletionsFormat implements CompletionFormat {
-    private static final Set<String> FIELDS = Set.of("model", "messages", "stream", "temperature", "max_tokens", "max_completion_tokens", "response_format", "tools", "tool_choice", "n");
+    private static final Set<String> FIELDS = Set.of("model", "messages", "stream", "temperature", "max_tokens", "max_completion_tokens", "response_format", "tools", "tool_choice", "n", "thinking", "reasoning_effort");
     public ResponseRequest parse(JsonNode input) {
         if (input == null || !input.isObject()) throw new ApiException(400, "invalid_request", "Provide a JSON object.");
         input.fieldNames().forEachRemaining(key -> { if (!FIELDS.contains(key)) throw unsupported(key); });
@@ -37,19 +37,27 @@ public class ChatCompletionsFormat implements CompletionFormat {
         if (input.has("stream")) request.set("stream", input.get("stream"));
         if (input.has("tools")) request.set("tools", input.get("tools"));
         if (input.has("tool_choice")) request.set("tool_choice", input.get("tool_choice"));
+        if (input.hasNonNull("thinking") && input.hasNonNull("reasoning_effort"))
+            throw new ApiException(400, "invalid_request", "Use either thinking or reasoning_effort, not both.", "thinking");
+        if (input.has("thinking")) request.set("thinking", input.get("thinking"));
+        var reasoning = ReasoningConfig.parseEffort(input.get("reasoning_effort"), "reasoning_effort");
+        if (reasoning != null) request.putObject("reasoning").put("effort", reasoning.effort());
         request.set("input", normalized); request.put("store", false);
         return ResponseRequest.parse(request);
     }
     public Map<String, Object> reply(ResponseDocument doc, String status, Provider.ProviderResult result, ApiException error) {
         if (error != null) return Errors.body(error);
         var body = envelope(doc, "chat.completion");
-        body.put("choices", List.of(Map.of("index", 0, "message", Map.of("role", "assistant", "content", result.text()), "finish_reason", "stop")));
+        var message = new LinkedHashMap<String, Object>(); message.put("role", "assistant"); message.put("content", result.text());
+        if (result.reasoning() != null && !result.reasoning().isEmpty()) message.put("reasoning_content", result.reasoning());
+        body.put("choices", List.of(Map.of("index", 0, "message", message, "finish_reason", "stop")));
         if (result.inputTokens() != null && result.outputTokens() != null) body.put("usage", Map.of("prompt_tokens", result.inputTokens(), "completion_tokens", result.outputTokens(), "total_tokens", result.inputTokens() + result.outputTokens()));
         else body.put("usage", null);
         return body;
     }
     public void start(ResponseDocument doc, StreamOutput stream) { chunk(doc, stream, Map.of("role", "assistant", "content", ""), null); }
     public void delta(ResponseDocument doc, StreamOutput stream, String text) { chunk(doc, stream, Map.of("content", text), null); }
+    public void reasoningDelta(ResponseDocument doc, StreamOutput stream, String text) { chunk(doc, stream, Map.of("reasoning_content", text), null); }
     public void complete(ResponseDocument doc, StreamOutput stream, Provider.ProviderResult result) { chunk(doc, stream, Map.of(), "stop"); stream.data("[DONE]"); }
     public void fail(ResponseDocument doc, StreamOutput stream, ApiException error) { stream.data(Errors.body(error)); }
     private Map<String, Object> envelope(ResponseDocument doc, String type) {

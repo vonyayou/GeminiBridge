@@ -18,6 +18,67 @@ beforeEach(() => { useChats.setState({ chats: [], activeId: null }); Element.pro
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('Playground', () => {
+  it.each([true, false])('shows and retains thinking separately with streaming=%s', async (streaming) => {
+    const bodies: Record<string, unknown>[] = []
+    const response = { id: 'resp_thinking', model: model.id, status: 'completed', output: [
+      { type: 'message', content: [{ type: 'output_text', text: 'Final answer' }] },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Model thinking 👋' }] },
+    ] }
+    vi.stubGlobal('fetch', vi.fn(async (path: string, options?: RequestInit) => {
+      if (path === '/api/models') return json([{ ...model, capabilities: [...model.capabilities, 'thinking'] }])
+      bodies.push(JSON.parse(options!.body as string))
+      if (!streaming) return json(response)
+      const events = [
+        { type: 'response.created', response },
+        { type: 'response.reasoning_summary_text.delta', delta: 'Model thinking 👋' },
+        { type: 'response.output_text.delta', delta: 'Final answer' },
+        { type: 'response.completed', response },
+      ]
+      return new Response(events.map((event, index) => `data: ${JSON.stringify({ ...event, sequence_number: index })}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    mount(<Playground />); const user = userEvent.setup()
+    await waitFor(() => expect(screen.getByLabelText('Message')).toBeEnabled())
+    expect(screen.getByLabelText('Thinking')).not.toBeChecked()
+    await user.click(screen.getByLabelText('Thinking'))
+    if (!streaming) await user.click(screen.getByLabelText('Streaming'))
+    await user.type(screen.getByLabelText('Message'), 'Hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByText('Final answer')).toBeInTheDocument()
+    expect(screen.getByText('Model thinking 👋')).toBeInTheDocument()
+    expect(screen.getByText('Thinking', { selector: 'summary' })).toBeInTheDocument()
+    expect(bodies[0]).toMatchObject({ thinking: true, stream: streaming })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument())
+    expect(useChats.getState().chats[0].messages[1]).toMatchObject({ content: 'Final answer', reasoning: 'Model thinking 👋', thinking: true })
+    expect(JSON.parse(localStorage.getItem('geminibridge.playground.v1')!).state.chats[0].thinking).toBe(true)
+    await user.type(screen.getByLabelText('Message'), 'Continue')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(bodies[1].input).toEqual([{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'Final answer' }, { role: 'user', content: 'Continue' }])
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+    expect(screen.getByLabelText('Thinking')).toBeChecked()
+  })
+  it('preserves partial thinking when generation is cancelled before the answer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (path: string, options?: RequestInit) => {
+      if (path === '/api/models') return json([{ ...model, capabilities: [...model.capabilities, 'thinking'] }])
+      if (path.includes('/cancel')) return json({ cancelled: true })
+      const stream = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_thinking"}}\n\ndata: {"type":"response.reasoning_summary_text.delta","sequence_number":1,"delta":"Partial thinking"}\n\n'))
+        options?.signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')))
+      } })
+      return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+    }))
+    mount(<Playground />); const user = userEvent.setup()
+    await waitFor(() => expect(screen.getByLabelText('Message')).toBeEnabled())
+    await user.click(screen.getByLabelText('Thinking'))
+    await user.type(screen.getByLabelText('Message'), 'Hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByText('Partial thinking')).toBeInTheDocument()
+    expect(screen.getByLabelText('Thinking')).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Stop generation' }))
+    expect(await screen.findByText('Stopped')).toBeInTheDocument()
+    expect(useChats.getState().chats[0].messages[1]).toMatchObject({ reasoning: 'Partial thinking', content: '', stopped: true })
+  })
   it('migrates saved model IDs and response labels to readable aliases', async () => {
     useChats.setState({ activeId: 'saved', chats: [{ id: 'saved', title: 'Saved chat', model: 'gemini-web-opaque', instructions: '', updatedAt: 1, messages: [{ id: 'reply', role: 'assistant', model: 'gemini-web-opaque', content: 'Previous reply' }] }] })
     vi.stubGlobal('fetch', vi.fn(async () => json([{ ...model, id: 'gemini-3.1-pro', displayName: '3.1 Pro', provider: 'gemini-web', mock: false, aliases: ['gemini-web-opaque'] }])))
@@ -26,6 +87,7 @@ describe('Playground', () => {
     expect(useChats.getState().chats[0].model).toBe('gemini-3.1-pro')
     expect(useChats.getState().chats[0].messages[0].model).toBe('gemini-3.1-pro')
     expect(screen.getByText('Previous reply')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Thinking')).not.toBeInTheDocument()
   })
   it('receives complete JSON responses when Streaming is disabled', async () => {
     const fetcher = vi.fn(async (path: string) => path === '/api/models' ? json([model]) : json({ id: 'resp_1', model: 'gemini-3.1-pro', status: 'completed', output: [{ content: [{ text: 'Complete response without streaming' }] }] }))

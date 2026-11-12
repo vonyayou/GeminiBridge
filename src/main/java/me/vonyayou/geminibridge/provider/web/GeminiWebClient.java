@@ -22,6 +22,8 @@ import java.util.regex.Pattern;
 @Component
 public class GeminiWebClient {
     private static final String MODEL_HEADER = "x-goog-ext-525001261-jspb";
+    private static final String BARD_ERROR_TYPE = "type.googleapis.com/assistant.boq.bard.application.BardErrorInfo";
+    private static final int GENERATION_RETRIES = 2;
     private final ObjectMapper mapper;
     private final OkHttpClient client;
     private final HttpUrl origin;
@@ -109,7 +111,7 @@ public class GeminiWebClient {
         for (JsonNode item : list) {
             String id = WebFrames.at(item, 0).asText("");
             if (!id.matches("[a-zA-Z0-9._-]{1,100}")) continue;
-            String name = firstText(item, 11, 19, 1, 10);
+            String name = firstText(item, 12, 2, 1, 10, 11, 19);
             if (name.isBlank()) continue;
             JsonNode modelNumber = WebFrames.at(item, 17);
             if (!modelNumber.isIntegralNumber()) modelNumber = WebFrames.at(item, 9);
@@ -124,6 +126,24 @@ public class GeminiWebClient {
         return List.copyOf(models.values());
     }
     public Provider.ProviderResult generate(WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, BooleanSupplier cancelled) {
+        long timeoutMillis = client.callTimeoutMillis() > 0 ? Math.min(client.callTimeoutMillis(), 115_000) : 115_000;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        var connection = connection(session);
+        var outputStarted = new java.util.concurrent.atomic.AtomicBoolean();
+        Consumer<String> trackedDelta = text -> { outputStarted.set(true); delta.accept(text); };
+        for (int attempt = 0; ; attempt++) {
+            checkCancelled(cancelled);
+            try {
+                return generateAttempt(connection, session, model, input, trackedDelta, cancelled, deadline);
+            } catch (RetryableGenerationError error) {
+                if (outputStarted.get() || attempt >= GENERATION_RETRIES) throw error;
+                long delay = TimeUnit.SECONDS.toNanos(5L << attempt);
+                if (deadline - System.nanoTime() <= delay) throw error;
+                waitForRetry(delay, cancelled);
+            }
+        }
+    }
+    private Provider.ProviderResult generateAttempt(OkHttpClient connection, WebSessionData session, WebModel model, Provider.ProviderRequest input, Consumer<String> delta, BooleanSupplier cancelled, long deadline) {
         String text = ProviderPrompt.format(input);
         var payload = new ArrayList<Object>(Collections.nCopies(81, null));
         payload.set(0, Arrays.asList(text, 0, null, null, null, null, 0)); payload.set(1, List.of(session.language()));
@@ -139,7 +159,8 @@ public class GeminiWebClient {
             var request = headers(new Request.Builder().url(query("/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", session).build()))
                     .header(MODEL_HEADER, mapper.writeValueAsString(selector)).header("x-goog-ext-73010989-jspb", "[0]").header("x-goog-ext-73010990-jspb", "[0,0,0]")
                     .header("x-goog-ext-525005358-jspb", mapper.writeValueAsString(List.of(nonce, 1))).post(body).build();
-            Call call = connection(session).newCall(request);
+            Call call = connection.newCall(request);
+            call.timeout().deadlineNanoTime(deadline);
             var watcher = Thread.ofVirtual().start(() -> {
                 try { while (!Thread.currentThread().isInterrupted()) { if (cancelled.getAsBoolean()) { call.cancel(); return; } Thread.sleep(25); } }
                 catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
@@ -148,8 +169,8 @@ public class GeminiWebClient {
                 validate(response, "generation");
                 var answer = new StringBuilder(); var complete = new java.util.concurrent.atomic.AtomicBoolean();
                 frames.read(Objects.requireNonNull(response.body()).charStream(), cancelled, part -> {
-                    JsonNode error = WebFrames.at(part, 5, 2, 0, 1, 0);
-                    if (error.isIntegralNumber() && error.asInt() != 0) throw streamError(error.asInt());
+                    ApiException error = streamError(part);
+                    if (error != null) throw error;
                     JsonNode encoded = WebFrames.at(part, 2);
                     if (!encoded.isTextual()) return;
                     JsonNode data;
@@ -222,11 +243,46 @@ public class GeminiWebClient {
     private static String firstText(JsonNode item, int... indices) { for (int index : indices) if (WebFrames.at(item, index).isTextual() && !item.get(index).asText().isBlank()) return item.get(index).asText(); return ""; }
     private static boolean has(JsonNode node, int value) { if (node.isArray()) for (JsonNode item : node) if (item.isIntegralNumber() && item.asInt() == value) return true; return false; }
     private static ApiException protocolError() { return new ApiException(502, "gemini_protocol_changed", "Gemini Web returned an unsupported protocol format. No fallback model was selected."); }
-    private static ApiException streamError(int code) {
+    private static ApiException streamError(JsonNode part) {
+        if (!WebFrames.at(part, 0).asText().equals("wrb.fr")) return null;
+        JsonNode rpc = WebFrames.at(part, 5, 0);
+        JsonNode details = WebFrames.at(part, 5, 2);
+        if (details.isArray()) for (JsonNode detail : details) {
+            if (!WebFrames.at(detail, 0).asText().equals(BARD_ERROR_TYPE)) continue;
+            JsonNode code = WebFrames.at(detail, 1, 0);
+            if (code.isIntegralNumber() && code.asInt() > 0) return streamError(code.asInt(), rpc.asInt());
+        }
+        if (rpc.isIntegralNumber() && rpc.asInt() != 0) {
+            if (rpc.asInt() == 8) return new ApiException(429, "gemini_resource_exhausted", "Gemini Web cannot accept this request right now. Please retry later.");
+            return new ApiException(502, "gemini_upstream_error", "Gemini Web returned RPC error " + rpc.asInt() + ".");
+        }
+        return null;
+    }
+    private static ApiException streamError(int code, int rpc) {
+        if (code == 1095) return new RetryableGenerationError(rpc == 8 ? 429 : 503);
         if (code == 1037) return new ApiException(429, "gemini_usage_limit", "Gemini Web reports that this model's usage limit has been reached.");
         if (code == 1052 || code == 1050) return new ApiException(502, "gemini_model_rejected", "Gemini Web rejected the selected model. Refresh model availability; no model substitution was made.");
         if (code == 1060) return new ApiException(403, "gemini_access_restricted", "Google restricted access for this session. Resolve it in Gemini Web.");
+        if (rpc == 8) return new ApiException(429, "gemini_resource_exhausted", "Gemini Web cannot accept this request right now (error " + code + "). Please retry later.");
         return new ApiException(502, "gemini_generation_error", "Gemini Web reported generation error " + code + ".");
+    }
+    private static final class RetryableGenerationError extends ApiException {
+        private RetryableGenerationError(int status) {
+            super(status, "gemini_temporarily_unavailable", "Gemini Web is temporarily unable to generate a response (error 1095). Please retry later.");
+        }
+    }
+    private static void checkCancelled(BooleanSupplier cancelled) {
+        if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+    }
+    private static void waitForRetry(long delay, BooleanSupplier cancelled) {
+        long until = System.nanoTime() + delay;
+        while (true) {
+            checkCancelled(cancelled);
+            long remaining = until - System.nanoTime();
+            if (remaining <= 0) return;
+            try { TimeUnit.NANOSECONDS.sleep(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(125))); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new java.util.concurrent.CancellationException(); }
+        }
     }
     private static ApiException networkError(Exception error) {
         if (error instanceof java.io.InterruptedIOException) return new ApiException(504, "gemini_timeout", "Gemini Web timed out while preparing the response. Try a shorter prompt or retry later.");

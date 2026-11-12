@@ -32,6 +32,17 @@ class GeminiWebClientTest {
         var candidate = new ArrayList<Object>(Collections.nCopies(9, null)); candidate.set(0, "candidate"); candidate.set(1, List.of(text)); candidate.set(8, List.of(done ? 2 : 1));
         var data = new ArrayList<Object>(Collections.nCopies(5, null)); data.set(4, List.of(candidate)); return data;
     }
+    private String errorFrame(int code, int rpc) throws Exception {
+        return mapper.writeValueAsString(List.of(Arrays.asList("wrb.fr", null, null, null, null,
+                Arrays.asList(rpc, "private upstream diagnostic", List.of(List.of("type.googleapis.com/assistant.boq.bard.application.BardErrorInfo", List.of(code))))))) + "\n";
+    }
+    private WebModel testModel() {
+        var payload = status(1000); payload.set(15, List.of(model("abc", "Web model", 4)));
+        return client.parseModels(mapper.valueToTree(payload)).getFirst();
+    }
+    private Provider.ProviderRequest testRequest(WebModel model, boolean streaming) {
+        return new Provider.ProviderRequest(model.id(), null, List.of(new Provider.Message("user", "Hello")), streaming);
+    }
     @Test void initializesOnlyAuthenticatedPagesAndDoesNotFollowSignInRedirects() throws Exception {
         server.enqueue(new MockResponse().setBody("<script>data={\"SNlM0e\":\"csrf\",\"cfb2h\":\"build\",\"FdrFJe\":\"sid\",\"TuX5cc\":\"en\"}</script>"));
         var data = client.initialize(new BrowserCookieReader.Cookies(Map.of("__Secure-1PSID", "own-session"), Instant.now().plusSeconds(600)));
@@ -135,6 +146,42 @@ class GeminiWebClientTest {
         assertThat(models.getFirst().selector().get(4)).isEqualTo("a1");
         assertThat(models.getFirst().selector().getLast()).isEqualTo(3);
     }
+    @Test void connectsWithCarbonAndLocalizedModelDescriptions() throws Exception {
+        var payload = status(1000); payload.set(0, 1); payload.set(14, null);
+        var rows = new ArrayList<List<Object>>();
+        String[][] names = {{"Flash-Lite", "3.5 Flash-Lite", "Быстрые ответы"}, {"Flash", "3.8 Flash", "All-around help"},
+                {"Pro", "3.1 Pro", "Исследования"}, {"Carbon", "4 Carbon", "Самые сложные задачи"}};
+        int[] numbers = {6, 1, 3, 8};
+        for (int i = 0; i < names.length; i++) {
+            var row = model("upstream-" + i, names[i][2], numbers[i]);
+            row.set(1, names[i][0]); row.set(2, names[i][1]); row.set(9, 20);
+            row.set(10, names[i][0]); row.set(12, names[i][1]); row.set(19, names[i][2]);
+            rows.add(row);
+        }
+        payload.set(15, rows);
+        server.enqueue(new MockResponse().setBody("{\"SNlM0e\":\"csrf\",\"TuX5cc\":\"ru\"}"));
+        server.enqueue(new MockResponse().setBody(frame(payload, "otAQ7b")));
+        var session = client.initialize(new BrowserCookieReader.Cookies(Map.of("__Secure-1PSID", "session-secret"), Instant.now().plusSeconds(600)));
+        var models = client.discover(session);
+        assertThat(models).extracting(WebModel::id).containsExactly("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-pro", "gemini-4-carbon");
+        assertThat(models).extracting(WebModel::displayName).containsExactly("3.5 Flash-Lite", "3.8 Flash", "3.1 Pro", "4 Carbon");
+        assertThat(models.getLast().upstreamId()).isEqualTo("upstream-3");
+        assertThat(models.getLast().selector().get(4)).isEqualTo("upstream-3");
+        assertThat(models.getLast().selector().getLast()).isEqualTo(8);
+    }
+    @Test void prefersFullModelNamesAndFallsBackToShortNamesBeforeDescriptions() {
+        var payload = status(1000);
+        var row = model("carbon", "Самые сложные задачи", 8);
+        row.set(1, "Carbon"); row.set(2, "4 Carbon"); row.set(10, "Carbon"); row.set(12, "Gemini 4 Carbon");
+        payload.set(15, List.of(row));
+        assertThat(client.parseModels(mapper.valueToTree(payload)).getFirst().displayName()).isEqualTo("Gemini 4 Carbon");
+        row.set(12, " ");
+        assertThat(client.parseModels(mapper.valueToTree(payload)).getFirst().id()).isEqualTo("gemini-4-carbon");
+        row.set(2, null);
+        assertThat(client.parseModels(mapper.valueToTree(payload)).getFirst().id()).isEqualTo("gemini-carbon");
+        row.set(1, null);
+        assertThat(client.parseModels(mapper.valueToTree(payload)).getFirst().displayName()).isEqualTo("Carbon");
+    }
     @Test void duplicateReadableNamesNeverSelectAnArbitraryUpstreamModel() {
         var payload = status(1000); payload.set(15, List.of(model("a1", "3.1 Pro", 3), model("a2", "Gemini 3.1 Pro", 8)));
         assertThatThrownBy(() -> client.parseModels(mapper.valueToTree(payload))).isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.code()).isEqualTo("ambiguous_model_names"));
@@ -181,10 +228,98 @@ class GeminiWebClientTest {
     }
     @Test void usageLimitDoesNotProduceACompletedResponse() throws Exception {
         var payload = status(1000); payload.set(15, List.of(model("abc", "Web model", 4))); var model = client.parseModels(mapper.valueToTree(payload)).getFirst();
-        var part = new ArrayList<Object>(Collections.nCopies(6, null)); part.set(5, Arrays.asList(null, null, List.of(Arrays.asList(null, List.of(1037)))));
-        server.enqueue(new MockResponse().setBody(mapper.writeValueAsString(List.of(part)) + "\n"));
+        server.enqueue(new MockResponse().setBody(errorFrame(1037, 8)));
         assertThatThrownBy(() -> client.generate(session(), model, new Provider.ProviderRequest(model.id(), null, List.of(new Provider.Message("user", "hello"))), ignored -> {}, () -> false))
                 .isInstanceOfSatisfying(ApiException.class, e -> { assertThat(e.status()).isEqualTo(429); assertThat(e.code()).isEqualTo("gemini_usage_limit"); });
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+    @Test void retries1095BeforeOutputWithTheSameModelAndFreshRequestIds() throws Exception {
+        var model = testModel();
+        for (boolean streaming : List.of(false, true)) {
+            server.enqueue(new MockResponse().setBody(errorFrame(1095, 8)).setHeader("Set-Cookie", "__Secure-1PSIDTS=retry-cookie; Path=/; HttpOnly"));
+            server.enqueue(new MockResponse().setBody(frame(candidate("Recovered", true), "generate")));
+            var data = session();
+            var deltas = new StringBuilder();
+            var result = client.generate(data, model, testRequest(model, streaming), deltas::append, () -> false);
+            assertThat(result.text()).isEqualTo("Recovered").isEqualTo(deltas.toString());
+            var first = server.takeRequest(); var retry = server.takeRequest();
+            assertThat(retry.getHeader("x-goog-ext-525001261-jspb")).isEqualTo(first.getHeader("x-goog-ext-525001261-jspb"));
+            assertThat(retry.getHeader("x-goog-ext-525005358-jspb")).isNotEqualTo(first.getHeader("x-goog-ext-525005358-jspb"));
+            assertThat(retry.getRequestUrl().queryParameter("_reqid")).isNotEqualTo(first.getRequestUrl().queryParameter("_reqid"));
+            assertThat(retry.getHeader("Cookie")).contains("__Secure-1PSIDTS=retry-cookie");
+        }
+    }
+    @Test void persistent1095StopsAfterTwoRetriesAndPreservesResourceExhaustion() throws Exception {
+        var model = testModel();
+        for (int i = 0; i < 3; i++) server.enqueue(new MockResponse().setBody(errorFrame(1095, 8)));
+        var deltas = new StringBuilder();
+        assertThatThrownBy(() -> client.generate(session(), model, testRequest(model, true), deltas::append, () -> false))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.status()).isEqualTo(429); assertThat(e.code()).isEqualTo("gemini_temporarily_unavailable");
+                    assertThat(e.getMessage()).contains("1095").doesNotContain("private upstream diagnostic");
+                });
+        assertThat(server.getRequestCount()).isEqualTo(3); assertThat(deltas).isEmpty();
+    }
+    @Test void neverRetries1095AfterOutputEvenForBufferedRequests() throws Exception {
+        var model = testModel();
+        for (boolean streaming : List.of(false, true)) {
+            server.enqueue(new MockResponse().setBody(frame(candidate("Partial", false), "generate") + errorFrame(1095, 8)));
+            var deltas = new StringBuilder();
+            assertThatThrownBy(() -> client.generate(session(), model, testRequest(model, streaming), deltas::append, () -> false))
+                    .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.status()).isEqualTo(429));
+            assertThat(deltas.toString()).isEqualTo("Partial");
+        }
+        assertThat(server.getRequestCount()).isEqualTo(2);
+    }
+    @Test void cancellationAfterRejectedAttemptDoesNotSendAnotherRequest() throws Exception {
+        var model = testModel();
+        var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        var http = new OkHttpClient.Builder().eventListener(new okhttp3.EventListener() {
+            @Override public void callEnd(okhttp3.Call call) { cancelled.set(true); }
+        }).build();
+        var cancellingClient = new GeminiWebClient(mapper, http, server.url("/").toString());
+        server.enqueue(new MockResponse().setBody(errorFrame(1095, 8)));
+        assertThatThrownBy(() -> cancellingClient.generate(session(), model, testRequest(model, true), ignored -> {}, cancelled::get))
+                .isInstanceOf(java.util.concurrent.CancellationException.class);
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+    @Test void retriedCallsShareTheOriginalTimeout() throws Exception {
+        var timedClient = new GeminiWebClient(mapper, new OkHttpClient.Builder().callTimeout(5500, TimeUnit.MILLISECONDS).build(), server.url("/").toString());
+        var model = testModel();
+        server.enqueue(new MockResponse().setBody(errorFrame(1095, 8)));
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var future = executor.submit(() -> timedClient.generate(session(), model, testRequest(model, true), ignored -> {}, () -> false));
+            assertThatThrownBy(() -> future.get(6, TimeUnit.SECONDS)).hasCauseInstanceOf(ApiException.class)
+                    .satisfies(error -> assertThat(((ApiException) error.getCause()).code()).isEqualTo("gemini_timeout"));
+        }
+        assertThat(server.getRequestCount()).isEqualTo(2);
+    }
+    @Test void retryDelayMustFitWithinTheOriginalCallTimeout() throws Exception {
+        var timedClient = new GeminiWebClient(mapper, new OkHttpClient.Builder().callTimeout(500, TimeUnit.MILLISECONDS).build(), server.url("/").toString());
+        var model = testModel();
+        server.enqueue(new MockResponse().setBody(errorFrame(1095, 8)));
+        assertThatThrownBy(() -> timedClient.generate(session(), model, testRequest(model, false), ignored -> {}, () -> false))
+                .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.status()).isEqualTo(429));
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+    @Test void resolvesTypedBardErrorsEvenAfterOtherRpcDetails() throws Exception {
+        var model = testModel();
+        var details = List.of(List.of("type.googleapis.com/google.rpc.ResourceInfo", List.of(1095)),
+                List.of("type.googleapis.com/assistant.boq.bard.application.BardErrorInfo", List.of(1037)));
+        var part = Arrays.asList("wrb.fr", null, null, null, null, Arrays.asList(8, "private detail", details));
+        server.enqueue(new MockResponse().setBody(mapper.writeValueAsString(List.of(part)) + "\n"));
+        assertThatThrownBy(() -> client.generate(session(), model, testRequest(model, false), ignored -> {}, () -> false))
+                .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.code()).isEqualTo("gemini_usage_limit"));
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+    @Test void unrelatedGenerationErrorsAreNeverRetried() throws Exception {
+        var model = testModel();
+        for (int code : List.of(1050, 1052, 1060, 1096, 9999)) {
+            server.enqueue(new MockResponse().setBody(errorFrame(code, 13)));
+            assertThatThrownBy(() -> client.generate(session(), model, testRequest(model, false), ignored -> {}, () -> false)).isInstanceOf(ApiException.class);
+        }
+        assertThat(server.getRequestCount()).isEqualTo(5);
     }
     @Test void cancellationClosesAnIdleUpstreamCall() throws Exception {
         var payload = status(1000); payload.set(15, List.of(model("abc", "Web model", 4))); var model = client.parseModels(mapper.valueToTree(payload)).getFirst();

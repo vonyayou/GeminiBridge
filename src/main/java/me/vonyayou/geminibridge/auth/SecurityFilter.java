@@ -38,13 +38,6 @@ public class SecurityFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         boolean api = path.startsWith("/api/") || path.startsWith("/v1/");
         if (api) response.setHeader("Cache-Control", "no-store");
-        if (!isLoopback(request.getRemoteAddr())) {
-            reject(request, response, 403, "local_access_required", "GeminiBridge accepts local connections only."); return;
-        }
-        String hostname = request.getServerName().toLowerCase(java.util.Locale.ROOT);
-        if (!Set.of("localhost", "127.0.0.1", "::1", "[::1]").contains(hostname)) {
-            reject(request, response, 403, "host_denied", "This hostname is not allowed."); return;
-        }
         if (api && !validOrigin(request)) { reject(request, response, 403, "origin_denied", "Cross-origin requests are not allowed."); return; }
         if (request.getContentLengthLong() > MAX_BODY) { reject(request, response, 413, "request_too_large", "Request body exceeds 1 MiB."); return; }
 
